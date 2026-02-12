@@ -66,7 +66,7 @@ type rateLimitCall struct {
 
 type modelRateLimitCall struct {
 	accountID int64
-	modelKey  string // 存储的 key（应该是官方模型 ID，如 "claude-sonnet-4-5"）
+	modelKey  string // 存储的 key（scope 名，如 "claude"、"gemini_text"）
 	resetAt   time.Time
 }
 
@@ -168,9 +168,9 @@ func TestHandleUpstreamError_429_ModelRateLimit(t *testing.T) {
 	require.NotNil(t, result)
 	require.True(t, result.Handled)
 	require.NotNil(t, result.SwitchError)
-	require.Equal(t, "claude-sonnet-4-5", result.SwitchError.RateLimitedModel)
+	require.Equal(t, "claude-sonnet-4-5", result.SwitchError.RateLimitedModel) // RateLimitedModel 保持原始模型名
 	require.Len(t, repo.modelRateLimitCalls, 1)
-	require.Equal(t, "claude-sonnet-4-5", repo.modelRateLimitCalls[0].modelKey)
+	require.Equal(t, "claude", repo.modelRateLimitCalls[0].modelKey) // 存储的 key 是 scope
 }
 
 // TestHandleUpstreamError_429_NonModelRateLimit 测试 429 非模型限流场景（走模型级限流兜底）
@@ -185,10 +185,10 @@ func TestHandleUpstreamError_429_NonModelRateLimit(t *testing.T) {
 	result := svc.handleUpstreamError(context.Background(), "[test]", account, http.StatusTooManyRequests, http.Header{}, body, "claude-sonnet-4-5", 0, "", false)
 
 	// handleModelRateLimit 不会处理（因为没有 RATE_LIMIT_EXCEEDED），
-	// 但 429 兜底逻辑会使用 requestedModel 设置模型级限流
+	// 但 429 兜底逻辑会使用 requestedModel 转为 scope 设置限流
 	require.Nil(t, result)
 	require.Len(t, repo.modelRateLimitCalls, 1)
-	require.Equal(t, "claude-sonnet-4-5", repo.modelRateLimitCalls[0].modelKey)
+	require.Equal(t, "claude", repo.modelRateLimitCalls[0].modelKey) // 存储的 key 是 scope
 }
 
 // TestHandleUpstreamError_503_ModelCapacityExhausted 测试 503 模型容量不足场景
@@ -695,8 +695,8 @@ func TestShouldTriggerAntigravitySmartRetry(t *testing.T) {
 	}
 }
 
-// TestSetModelRateLimitByModelName_UsesOfficialModelID 验证写入端使用官方模型 ID
-func TestSetModelRateLimitByModelName_UsesOfficialModelID(t *testing.T) {
+// TestSetModelRateLimitByModelName_ConvertsToScope 验证写入端将模型名转换为 scope
+func TestSetModelRateLimitByModelName_ConvertsToScope(t *testing.T) {
 	tests := []struct {
 		name             string
 		modelName        string
@@ -704,26 +704,44 @@ func TestSetModelRateLimitByModelName_UsesOfficialModelID(t *testing.T) {
 		expectedSuccess  bool
 	}{
 		{
-			name:             "claude-sonnet-4-5 should be stored as-is",
+			name:             "claude-sonnet-4-5 stored as claude scope",
 			modelName:        "claude-sonnet-4-5",
-			expectedModelKey: "claude-sonnet-4-5",
+			expectedModelKey: "claude",
 			expectedSuccess:  true,
 		},
 		{
-			name:             "gemini-3-pro-high should be stored as-is",
+			name:             "gemini-3-pro-high stored as gemini_text scope",
 			modelName:        "gemini-3-pro-high",
-			expectedModelKey: "gemini-3-pro-high",
+			expectedModelKey: "gemini_text",
 			expectedSuccess:  true,
 		},
 		{
-			name:             "gemini-3-flash should be stored as-is",
+			name:             "gemini-3-flash stored as gemini_text scope",
 			modelName:        "gemini-3-flash",
-			expectedModelKey: "gemini-3-flash",
+			expectedModelKey: "gemini_text",
+			expectedSuccess:  true,
+		},
+		{
+			name:             "gemini-3-pro-image stored as gemini_image scope",
+			modelName:        "gemini-3-pro-image",
+			expectedModelKey: "gemini_image",
+			expectedSuccess:  true,
+		},
+		{
+			name:             "gemini-2.5-flash-image-preview stored as gemini_image scope",
+			modelName:        "gemini-2.5-flash-image-preview",
+			expectedModelKey: "gemini_image",
 			expectedSuccess:  true,
 		},
 		{
 			name:             "empty model name should fail",
 			modelName:        "",
+			expectedModelKey: "",
+			expectedSuccess:  false,
+		},
+		{
+			name:             "unsupported model should fail",
+			modelName:        "gpt-4",
 			expectedModelKey: "",
 			expectedSuccess:  false,
 		},
@@ -751,8 +769,7 @@ func TestSetModelRateLimitByModelName_UsesOfficialModelID(t *testing.T) {
 				require.Len(t, repo.modelRateLimitCalls, 1)
 				call := repo.modelRateLimitCalls[0]
 				require.Equal(t, int64(123), call.accountID)
-				// 关键断言：存储的 key 应该是官方模型 ID，而不是 scope
-				require.Equal(t, tt.expectedModelKey, call.modelKey, "should store official model ID, not scope")
+				require.Equal(t, tt.expectedModelKey, call.modelKey, "should store scope, not model ID")
 				require.WithinDuration(t, resetAt, call.resetAt, time.Second)
 			} else {
 				require.Empty(t, repo.modelRateLimitCalls)
@@ -761,30 +778,20 @@ func TestSetModelRateLimitByModelName_UsesOfficialModelID(t *testing.T) {
 	}
 }
 
-// TestSetModelRateLimitByModelName_NotConvertToScope 验证不会将模型名转换为 scope
-func TestSetModelRateLimitByModelName_NotConvertToScope(t *testing.T) {
+// TestSetModelRateLimitByModelName_DifferentModelsShareScope 验证同 scope 下不同模型写入相同 key
+func TestSetModelRateLimitByModelName_DifferentModelsShareScope(t *testing.T) {
 	repo := &stubAntigravityAccountRepo{}
 	resetAt := time.Now().Add(30 * time.Second)
 
-	// 调用 setModelRateLimitByModelName，传入官方模型 ID
-	success := setModelRateLimitByModelName(
-		context.Background(),
-		repo,
-		456,
-		"claude-sonnet-4-5", // 官方模型 ID
-		"[test]",
-		429,
-		resetAt,
-		true, // afterSmartRetry
-	)
+	// claude-sonnet-4-5 和 claude-opus-4-6 都应写入 "claude" scope
+	success1 := setModelRateLimitByModelName(context.Background(), repo, 456, "claude-sonnet-4-5", "[test]", 429, resetAt, false)
+	success2 := setModelRateLimitByModelName(context.Background(), repo, 456, "claude-opus-4-6", "[test]", 429, resetAt, true)
 
-	require.True(t, success)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-
-	call := repo.modelRateLimitCalls[0]
-	// 关键断言：存储的应该是 "claude-sonnet-4-5"，而不是 "claude_sonnet"
-	require.Equal(t, "claude-sonnet-4-5", call.modelKey, "should NOT convert to scope like claude_sonnet")
-	require.NotEqual(t, "claude_sonnet", call.modelKey, "should NOT be scope")
+	require.True(t, success1)
+	require.True(t, success2)
+	require.Len(t, repo.modelRateLimitCalls, 2)
+	require.Equal(t, "claude", repo.modelRateLimitCalls[0].modelKey)
+	require.Equal(t, "claude", repo.modelRateLimitCalls[1].modelKey)
 }
 
 func TestAntigravityRetryLoop_PreCheck_SwitchesWhenRateLimited(t *testing.T) {
@@ -798,7 +805,7 @@ func TestAntigravityRetryLoop_PreCheck_SwitchesWhenRateLimited(t *testing.T) {
 		Concurrency: 1,
 		Extra: map[string]any{
 			modelRateLimitsKey: map[string]any{
-				"claude-sonnet-4-5": map[string]any{
+				"claude": map[string]any{
 					"rate_limit_reset_at": time.Now().Add(2 * time.Second).Format(time.RFC3339),
 				},
 			},
@@ -841,7 +848,7 @@ func TestAntigravityRetryLoop_PreCheck_SwitchesWhenRemainingLong(t *testing.T) {
 		Concurrency: 1,
 		Extra: map[string]any{
 			modelRateLimitsKey: map[string]any{
-				"claude-sonnet-4-5": map[string]any{
+				"claude": map[string]any{
 					"rate_limit_reset_at": time.Now().Add(11 * time.Second).Format(time.RFC3339),
 				},
 			},
@@ -982,16 +989,16 @@ func TestUpdateAccountModelRateLimitInCache_UpdatesExtraAndCallsCache(t *testing
 		Name:     "test-account",
 		Platform: PlatformAntigravity,
 	}
-	modelKey := "claude-sonnet-4-5"
+	modelKey := "claude-sonnet-4-5" // 传入模型 ID，应自动转为 scope
 	resetAt := time.Now().Add(30 * time.Second)
 
 	svc.updateAccountModelRateLimitInCache(context.Background(), account, modelKey, resetAt)
 
-	// 验证 Extra 字段被正确更新
+	// 验证 Extra 字段被正确更新，key 应该是 scope "claude"
 	require.NotNil(t, account.Extra)
 	limits, ok := account.Extra["model_rate_limits"].(map[string]any)
 	require.True(t, ok)
-	modelLimit, ok := limits[modelKey].(map[string]any)
+	modelLimit, ok := limits["claude"].(map[string]any) // 存储的 key 是 scope
 	require.True(t, ok)
 	require.NotEmpty(t, modelLimit["rate_limited_at"])
 	require.NotEmpty(t, modelLimit["rate_limit_reset_at"])
@@ -1009,7 +1016,7 @@ func TestUpdateAccountModelRateLimitInCache_NilSchedulerSnapshot(t *testing.T) {
 
 	account := &Account{ID: 1, Name: "test"}
 
-	// 不应 panic
+	// 不应 panic（schedulerSnapshot 为 nil 时提前返回）
 	svc.updateAccountModelRateLimitInCache(context.Background(), account, "claude-sonnet-4-5", time.Now().Add(30*time.Second))
 
 	// Extra 不应被更新（因为函数提前返回）
@@ -1044,8 +1051,8 @@ func TestUpdateAccountModelRateLimitInCache_PreservesExistingExtra(t *testing.T)
 	// 验证已有数据被保留
 	require.Equal(t, "existing_value", account.Extra["existing_key"])
 	limits := account.Extra["model_rate_limits"].(map[string]any)
-	require.NotNil(t, limits["gemini-3-flash"])
-	require.NotNil(t, limits["claude-sonnet-4-5"])
+	require.NotNil(t, limits["gemini-3-flash"]) // 已有数据保持不变
+	require.NotNil(t, limits["claude"])          // 新增的 key 是 scope "claude"，不是模型 ID
 }
 
 // TestSchedulerSnapshotService_UpdateAccountInCache 测试 UpdateAccountInCache 方法

@@ -220,6 +220,7 @@ func TestAntigravityGatewayService_Forward_ModelRateLimitTriggersFailover(t *tes
 	}
 
 	// 设置模型限流：剩余时间 30 秒（> antigravityRateLimitThreshold 7s）
+	// 使用 scope key "claude"（所有 claude-* 模型共享）
 	futureResetAt := time.Now().Add(30 * time.Second).Format(time.RFC3339)
 	account := &Account{
 		ID:          1,
@@ -233,7 +234,7 @@ func TestAntigravityGatewayService_Forward_ModelRateLimitTriggersFailover(t *tes
 		},
 		Extra: map[string]any{
 			modelRateLimitsKey: map[string]any{
-				"claude-opus-4-6-thinking": map[string]any{
+				"claude": map[string]any{
 					"rate_limit_reset_at": futureResetAt,
 				},
 			},
@@ -276,6 +277,7 @@ func TestAntigravityGatewayService_ForwardGemini_ModelRateLimitTriggersFailover(
 	}
 
 	// 设置模型限流：剩余时间 30 秒（> antigravityRateLimitThreshold 7s）
+	// 使用 scope key "gemini_text"（所有 gemini-* 文本模型共享）
 	futureResetAt := time.Now().Add(30 * time.Second).Format(time.RFC3339)
 	account := &Account{
 		ID:          2,
@@ -289,7 +291,7 @@ func TestAntigravityGatewayService_ForwardGemini_ModelRateLimitTriggersFailover(
 		},
 		Extra: map[string]any{
 			modelRateLimitsKey: map[string]any{
-				"gemini-2.5-flash": map[string]any{
+				"gemini_text": map[string]any{
 					"rate_limit_reset_at": futureResetAt,
 				},
 			},
@@ -330,6 +332,7 @@ func TestAntigravityGatewayService_Forward_StickySessionForceCacheBilling(t *tes
 	}
 
 	// 设置模型限流：剩余时间 30 秒（> antigravityRateLimitThreshold 7s）
+	// 使用 scope key "claude"（所有 claude-* 模型共享）
 	futureResetAt := time.Now().Add(30 * time.Second).Format(time.RFC3339)
 	account := &Account{
 		ID:          3,
@@ -343,7 +346,7 @@ func TestAntigravityGatewayService_Forward_StickySessionForceCacheBilling(t *tes
 		},
 		Extra: map[string]any{
 			modelRateLimitsKey: map[string]any{
-				"claude-opus-4-6-thinking": map[string]any{
+				"claude": map[string]any{
 					"rate_limit_reset_at": futureResetAt,
 				},
 			},
@@ -385,6 +388,7 @@ func TestAntigravityGatewayService_ForwardGemini_StickySessionForceCacheBilling(
 	}
 
 	// 设置模型限流：剩余时间 30 秒（> antigravityRateLimitThreshold 7s）
+	// 使用 scope key "gemini_text"（所有 gemini-* 文本模型共享）
 	futureResetAt := time.Now().Add(30 * time.Second).Format(time.RFC3339)
 	account := &Account{
 		ID:          4,
@@ -398,7 +402,7 @@ func TestAntigravityGatewayService_ForwardGemini_StickySessionForceCacheBilling(
 		},
 		Extra: map[string]any{
 			modelRateLimitsKey: map[string]any{
-				"gemini-2.5-flash": map[string]any{
+				"gemini_text": map[string]any{
 					"rate_limit_reset_at": futureResetAt,
 				},
 			},

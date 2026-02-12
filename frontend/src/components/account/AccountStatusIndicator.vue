@@ -156,13 +156,8 @@ const activeModelRateLimits = computed(() => {
 const formatScopeName = (scope: string): string => {
   const names: Record<string, string> = {
     claude: 'Claude',
-    claude_sonnet: 'Claude Sonnet',
-    claude_opus: 'Claude Opus',
-    claude_haiku: 'Claude Haiku',
     gemini_text: 'Gemini',
     gemini_image: 'Image',
-    gemini_flash: 'Gemini Flash',
-    gemini_pro: 'Gemini Pro'
   }
   return names[scope] || scope
 }

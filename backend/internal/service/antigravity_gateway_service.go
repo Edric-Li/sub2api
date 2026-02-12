@@ -373,12 +373,16 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 
 		resetAt := time.Now().Add(rateLimitDuration)
 		if p.accountRepo != nil && modelName != "" {
-			if err := p.accountRepo.SetModelRateLimit(p.ctx, p.account.ID, modelName, resetAt); err != nil {
-				log.Printf("%s status=%d model_rate_limit_failed model=%s error=%v", p.prefix, resp.StatusCode, modelName, err)
+			scopeKey := modelName
+			if scope, ok := resolveAntigravityQuotaScope(modelName); ok {
+				scopeKey = string(scope)
+			}
+			if err := p.accountRepo.SetModelRateLimit(p.ctx, p.account.ID, scopeKey, resetAt); err != nil {
+				log.Printf("%s status=%d model_rate_limit_failed scope=%s error=%v", p.prefix, resp.StatusCode, scopeKey, err)
 			} else {
-				log.Printf("%s status=%d model_rate_limited_after_smart_retry model=%s account=%d reset_in=%v",
-					p.prefix, resp.StatusCode, modelName, p.account.ID, rateLimitDuration)
-				s.updateAccountModelRateLimitInCache(p.ctx, p.account, modelName, resetAt)
+				log.Printf("%s status=%d model_rate_limited_after_smart_retry scope=%s account=%d reset_in=%v",
+					p.prefix, resp.StatusCode, scopeKey, p.account.ID, rateLimitDuration)
+				s.updateAccountModelRateLimitInCache(p.ctx, p.account, scopeKey, resetAt)
 			}
 		}
 
@@ -2288,22 +2292,25 @@ func isSingleAccountRetry(ctx context.Context) bool {
 	return v
 }
 
-// setModelRateLimitByModelName 使用官方模型 ID 设置模型级限流
-// 直接使用上游返回的模型 ID（如 claude-sonnet-4-5）作为限流 key
-// 返回是否已成功设置（若模型名为空或 repo 为 nil 将返回 false）
+// setModelRateLimitByModelName 将上游返回的模型 ID 转换为 scope 后设置限流
+// 返回是否已成功设置（若模型名为空、无法解析 scope 或 repo 为 nil 将返回 false）
 func setModelRateLimitByModelName(ctx context.Context, repo AccountRepository, accountID int64, modelName, prefix string, statusCode int, resetAt time.Time, afterSmartRetry bool) bool {
 	if repo == nil || modelName == "" {
 		return false
 	}
-	// 直接使用官方模型 ID 作为 key，不再转换为 scope
-	if err := repo.SetModelRateLimit(ctx, accountID, modelName, resetAt); err != nil {
-		log.Printf("%s status=%d model_rate_limit_failed model=%s error=%v", prefix, statusCode, modelName, err)
+	scope, ok := resolveAntigravityQuotaScope(modelName)
+	if !ok {
+		return false
+	}
+	scopeKey := string(scope)
+	if err := repo.SetModelRateLimit(ctx, accountID, scopeKey, resetAt); err != nil {
+		log.Printf("%s status=%d model_rate_limit_failed scope=%s model=%s error=%v", prefix, statusCode, scopeKey, modelName, err)
 		return false
 	}
 	if afterSmartRetry {
-		log.Printf("%s status=%d model_rate_limited_after_smart_retry model=%s account=%d reset_in=%v", prefix, statusCode, modelName, accountID, time.Until(resetAt).Truncate(time.Second))
+		log.Printf("%s status=%d model_rate_limited_after_smart_retry scope=%s account=%d reset_in=%v", prefix, statusCode, scopeKey, accountID, time.Until(resetAt).Truncate(time.Second))
 	} else {
-		log.Printf("%s status=%d model_rate_limited model=%s account=%d reset_in=%v", prefix, statusCode, modelName, accountID, time.Until(resetAt).Truncate(time.Second))
+		log.Printf("%s status=%d model_rate_limited scope=%s account=%d reset_in=%v", prefix, statusCode, scopeKey, accountID, time.Until(resetAt).Truncate(time.Second))
 	}
 	return true
 }
@@ -2323,7 +2330,7 @@ func antigravityFallbackCooldownSeconds() (time.Duration, bool) {
 // antigravitySmartRetryInfo 智能重试所需的信息
 type antigravitySmartRetryInfo struct {
 	RetryDelay               time.Duration // 重试延迟时间
-	ModelName                string        // 限流的模型名称（如 "claude-sonnet-4-5"）
+	ModelName                string        // 上游返回的模型名称（如 "claude-sonnet-4-5"），写入限流时会转为 scope
 	IsModelCapacityExhausted bool          // 是否为模型容量不足（MODEL_CAPACITY_EXHAUSTED）
 }
 
@@ -2557,16 +2564,23 @@ func (s *AntigravityGatewayService) handleModelRateLimit(p *handleModelRateLimit
 // setModelRateLimitAndClearSession 设置模型限流并清除粘性会话
 func (s *AntigravityGatewayService) setModelRateLimitAndClearSession(p *handleModelRateLimitParams, info *antigravitySmartRetryInfo) {
 	resetAt := time.Now().Add(info.RetryDelay)
-	log.Printf("%s status=%d model_rate_limited model=%s account=%d reset_in=%v",
-		p.prefix, p.statusCode, info.ModelName, p.account.ID, info.RetryDelay)
+
+	// 将上游模型 ID 转为 scope
+	scopeKey := info.ModelName
+	if scope, ok := resolveAntigravityQuotaScope(info.ModelName); ok {
+		scopeKey = string(scope)
+	}
+
+	log.Printf("%s status=%d model_rate_limited scope=%s model=%s account=%d reset_in=%v",
+		p.prefix, p.statusCode, scopeKey, info.ModelName, p.account.ID, info.RetryDelay)
 
 	// 设置模型限流状态（数据库）
-	if err := s.accountRepo.SetModelRateLimit(p.ctx, p.account.ID, info.ModelName, resetAt); err != nil {
-		log.Printf("%s model_rate_limit_failed model=%s error=%v", p.prefix, info.ModelName, err)
+	if err := s.accountRepo.SetModelRateLimit(p.ctx, p.account.ID, scopeKey, resetAt); err != nil {
+		log.Printf("%s model_rate_limit_failed scope=%s error=%v", p.prefix, scopeKey, err)
 	}
 
 	// 立即更新 Redis 快照中账号的限流状态，避免并发请求重复选中
-	s.updateAccountModelRateLimitInCache(p.ctx, p.account, info.ModelName, resetAt)
+	s.updateAccountModelRateLimitInCache(p.ctx, p.account, scopeKey, resetAt)
 
 	// 清除粘性会话绑定
 	if p.cache != nil && p.sessionHash != "" {
@@ -2575,9 +2589,15 @@ func (s *AntigravityGatewayService) setModelRateLimitAndClearSession(p *handleMo
 }
 
 // updateAccountModelRateLimitInCache 立即更新 Redis 中账号的模型限流状态
+// modelKey 可以是原始模型 ID（自动转为 scope）或已转换的 scope 名
 func (s *AntigravityGatewayService) updateAccountModelRateLimitInCache(ctx context.Context, account *Account, modelKey string, resetAt time.Time) {
 	if s.schedulerSnapshot == nil || account == nil || modelKey == "" {
 		return
+	}
+
+	// 尝试将 modelKey 转为 scope；已经是 scope 的 key 不会匹配前缀，保持原值
+	if scope, ok := resolveAntigravityQuotaScope(modelKey); ok {
+		modelKey = string(scope)
 	}
 
 	// 更新账号对象的 Extra 字段
@@ -2598,7 +2618,7 @@ func (s *AntigravityGatewayService) updateAccountModelRateLimitInCache(ctx conte
 
 	// 更新 Redis 快照
 	if err := s.schedulerSnapshot.UpdateAccountInCache(ctx, account); err != nil {
-		log.Printf("[antigravity-Forward] cache_update_failed account=%d model=%s err=%v", account.ID, modelKey, err)
+		log.Printf("[antigravity-Forward] cache_update_failed account=%d scope=%s err=%v", account.ID, modelKey, err)
 	}
 }
 

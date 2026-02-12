@@ -6,16 +6,51 @@ import (
 	"time"
 )
 
+// AntigravityQuotaScope 表示 Antigravity 配额的限流范围
+// claude-* 模型共享 claude scope，gemini-* 文本模型共享 gemini_text scope，
+// gemini-* 图像模型共享 gemini_image scope
+type AntigravityQuotaScope string
+
+const (
+	AntigravityQuotaScopeClaude      AntigravityQuotaScope = "claude"
+	AntigravityQuotaScopeGeminiText  AntigravityQuotaScope = "gemini_text"
+	AntigravityQuotaScopeGeminiImage AntigravityQuotaScope = "gemini_image"
+)
+
 func normalizeAntigravityModelName(model string) string {
 	normalized := strings.ToLower(strings.TrimSpace(model))
 	normalized = strings.TrimPrefix(normalized, "models/")
 	return normalized
 }
 
-// resolveAntigravityModelKey 根据请求的模型名解析限流 key
+// resolveAntigravityQuotaScope 根据模型名解析所属的限流 scope
+// 返回 scope 和是否成功解析
+func resolveAntigravityQuotaScope(requestedModel string) (AntigravityQuotaScope, bool) {
+	model := normalizeAntigravityModelName(requestedModel)
+	if model == "" {
+		return "", false
+	}
+	switch {
+	case strings.HasPrefix(model, "claude-"):
+		return AntigravityQuotaScopeClaude, true
+	case strings.HasPrefix(model, "gemini-"):
+		if isImageGenerationModel(model) {
+			return AntigravityQuotaScopeGeminiImage, true
+		}
+		return AntigravityQuotaScopeGeminiText, true
+	default:
+		return "", false
+	}
+}
+
+// resolveAntigravityModelKey 根据请求的模型名解析限流 key（scope 名）
 // 返回空字符串表示无法解析
 func resolveAntigravityModelKey(requestedModel string) string {
-	return normalizeAntigravityModelName(requestedModel)
+	scope, ok := resolveAntigravityQuotaScope(requestedModel)
+	if !ok {
+		return ""
+	}
+	return string(scope)
 }
 
 // IsSchedulableForModel 结合模型级限流判断是否可调度。
